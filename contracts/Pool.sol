@@ -76,10 +76,15 @@ contract Pool is IPool, ReentrancyGuard {
     // User Must Allow Before Repaying
     function repay(address _asset, uint256 _amount) external nonReentrant
     {
+        require(_amount <= borrowedBalances[msg.sender][_asset], "Pool: No Need To Repay This Amount");
+        require(_amount <= IERC20(_asset).allowance(msg.sender, address(this)), "Pool: Transfer Not Autherized");
+        require(_amount <= IERC20(_asset).balanceOf(msg.sender), "Pool: Not Enough Balance");
         borrowedBalances[msg.sender][_asset] -= _amount;
         netBorrows[_asset] -= _amount;
 
         userNetBorrowedAssets[msg.sender] -= _amount * calculatePrice(_asset);
+
+        IERC20(_asset).transferFrom(msg.sender, address(this), _amount);
 
         (uint256 borrowRate, uint256 depositRate) = reCalculateRates(_asset);
 
