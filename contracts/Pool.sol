@@ -3,9 +3,11 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 // Uniswap Contract Address: 0x0227628f3F023bb0B980b67D528571c95c6DaC1c
-import '@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol';
+import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 import "./Interface/IPool.sol";
 
@@ -14,43 +16,48 @@ import "./Interface/IPool.sol";
 // Deposit Rate = Borrowed Rate * Utilization
 
 contract Pool is IPool, ReentrancyGuard {
-    uint256 public constant DECIMALS = 18;
-    address public constant WETH = 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9;
-    address public constant UNISWAPFACTORY = 0x0227628f3F023bb0B980b67D528571c95c6DaC1c;
-    bytes32 internal constant POOL_INIT_CODE_HASH = 0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54;
+    uint256 private constant DECIMALS = 18;
+
+    // Only Testnet, Change After Deploying on Mainet
+    address private constant USD = 0xbdfBcCcfd102ee458725a3f510e03A106ba7A738;
+    address private constant UNISWAPFACTORY = 0x0227628f3F023bb0B980b67D528571c95c6DaC1c;
 
     mapping(address => mapping(address => uint256)) depositBalances;
-    mapping(address => uint256) userNetLiquidAssets;
+    mapping(address => address[]) depositedAddress;
 
     mapping(address => mapping(address => uint256)) borrowedBalances;
-    mapping(address => uint256) userNetBorrowedAssets;
+    mapping(address => address[]) borrowedAddress;
 
 
     mapping(address => uint256) netDeposits;
     mapping(address => uint256) netBorrows;
+
     // User Must Allow Before Depositing
     function deposit(address _asset, uint256 _amount) external nonReentrant
     {
-        require(_amount <= IERC20(_asset).balanceOf(msg.sender), "Pool: Not Enough Balance");
-        require(_amount <= IERC20(_asset).allowance(msg.sender, address(this)), "Pool: Transfer Not Autherized");
-        IERC20(_asset).transferFrom(msg.sender, address(this), _amount);
-        depositBalances[msg.sender][_asset] += _amount;
-        netDeposits[_asset] += _amount;
-
-        userNetLiquidAssets[msg.sender] += _amount * calculatePrice(_asset);
+        uint amount = _amount * 10**ERC20(_asset).decimals();
+        require(amount <= IERC20(_asset).balanceOf(msg.sender), "Pool: Not Enough Balance");
+        require(amount <= IERC20(_asset).allowance(msg.sender, address(this)), "Pool: Transfer Not Autherized");
+        IERC20(_asset).transferFrom(msg.sender, address(this), amount);
+        depositBalances[msg.sender][_asset] += amount;
+        netDeposits[_asset] += amount;
+        depositedAddress[msg.sender].push(_asset);
 
         (uint256 borrowRate, uint256 depositRate) = reCalculateRates(_asset);
 
-        emit Deposit(msg.sender, _asset, _amount, depositRate, borrowRate, block.timestamp);
+        emit Deposit(msg.sender, _asset, amount, depositRate, borrowRate, block.timestamp);
     }
     function withdraw(address _asset, uint256 _amount) external nonReentrant
     {
-        require(_amount <= depositBalances[msg.sender][_asset], "Pool: Not Enough Balance");
-        IERC20(_asset).transfer(msg.sender, _amount);
-        depositBalances[msg.sender][_asset] -= _amount;
-        netDeposits[_asset] -= _amount;
+        uint amount = _amount * 10**ERC20(_asset).decimals();
+        uint256 userNetLiquidAssets = getAssetsSum(depositedAddress[msg.sender], depositBalances[msg.sender]);
+        uint256 userNetBorrowedAssets = getAssetsSum(borrowedAddress[msg.sender], borrowedBalances[msg.sender]);
 
-        userNetLiquidAssets[msg.sender] -= _amount * calculatePrice(_asset);
+        require(amount <= depositBalances[msg.sender][_asset], "Pool: Not Enough Balance");
+        require(userNetLiquidAssets - amount * calculatePrice(_asset)/(10**18) > userNetBorrowedAssets, "Pool: Can't Withdraw, Too Much Borrowed");
+        IERC20(_asset).transfer(msg.sender, amount);
+        depositBalances[msg.sender][_asset] -= amount;
+        netDeposits[_asset] -= amount;
 
         (uint256 borrowRate, uint256 depositRate) = reCalculateRates(_asset);
 
@@ -58,37 +65,39 @@ contract Pool is IPool, ReentrancyGuard {
     }
     function borrow(address _asset, uint256 _amount) external nonReentrant
     {
-        uint256 liquidAssets = userNetLiquidAssets[msg.sender];
+        uint amount = _amount * 10**ERC20(_asset).decimals();
+        uint256 userNetLiquidAssets = getAssetsSum(depositedAddress[msg.sender], depositBalances[msg.sender]);
+        uint256 userNetBorrowedAssets = getAssetsSum(borrowedAddress[msg.sender], borrowedBalances[msg.sender]);
+
+        uint256 liquidAssets = userNetLiquidAssets;
         // Check if user has enough assets and calculate risk; if risk above 80% then don't allow to borrow
-        require(_amount * calculatePrice(_asset) + userNetBorrowedAssets[msg.sender] <= liquidAssets, "Pool: Not Enough Collateral Assets");
-        borrowedBalances[msg.sender][_asset] += _amount;
-        netBorrows[_asset] += _amount;
+        require(amount * calculatePrice(_asset)/(10**18) + userNetBorrowedAssets <= liquidAssets, "Pool: Not Enough Collateral Assets");
+        borrowedBalances[msg.sender][_asset] += amount;
+        netBorrows[_asset] += amount;
+        borrowedAddress[msg.sender].push(_asset);
 
-        userNetBorrowedAssets[msg.sender] += _amount * calculatePrice(_asset);
-
-        IERC20(_asset).transfer(msg.sender, _amount);
+        IERC20(_asset).transfer(msg.sender, amount);
 
         (uint256 borrowRate, uint256 depositRate) = reCalculateRates(_asset);
 
-        emit Borrow(msg.sender, _asset, _amount, depositRate, borrowRate, block.timestamp);
+        emit Borrow(msg.sender, _asset, amount, depositRate, borrowRate, block.timestamp);
     }
 
     // User Must Allow Before Repaying
     function repay(address _asset, uint256 _amount) external nonReentrant
     {
-        require(_amount <= borrowedBalances[msg.sender][_asset], "Pool: No Need To Repay This Amount");
-        require(_amount <= IERC20(_asset).allowance(msg.sender, address(this)), "Pool: Transfer Not Autherized");
-        require(_amount <= IERC20(_asset).balanceOf(msg.sender), "Pool: Not Enough Balance");
-        borrowedBalances[msg.sender][_asset] -= _amount;
-        netBorrows[_asset] -= _amount;
+        uint amount = _amount * 10**ERC20(_asset).decimals();
+        require(amount <= borrowedBalances[msg.sender][_asset], "Pool: No Need To Repay This Amount");
+        require(amount <= IERC20(_asset).allowance(msg.sender, address(this)), "Pool: Transfer Not Autherized");
+        require(amount <= IERC20(_asset).balanceOf(msg.sender), "Pool: Not Enough Balance");
+        borrowedBalances[msg.sender][_asset] -= amount;
+        netBorrows[_asset] -= amount;
 
-        userNetBorrowedAssets[msg.sender] -= _amount * calculatePrice(_asset);
-
-        IERC20(_asset).transferFrom(msg.sender, address(this), _amount);
+        IERC20(_asset).transferFrom(msg.sender, address(this), amount);
 
         (uint256 borrowRate, uint256 depositRate) = reCalculateRates(_asset);
 
-        emit Repay(msg.sender, _asset, _amount, depositRate, borrowRate, block.timestamp);
+        emit Repay(msg.sender, _asset, amount, depositRate, borrowRate, block.timestamp);
     }
     function liquidate(address _user, address _collateralAsset, address _borrowedAsset) external nonReentrant
     {
@@ -100,7 +109,8 @@ contract Pool is IPool, ReentrancyGuard {
         emit Liquidate(_user, _collateralAsset, IERC20(_collateralAsset).balanceOf(_user), depositRate, borrowRate, block.timestamp);
     }
 
-    function reCalculateRates(address _asset) private view returns (uint256, uint256){
+    function reCalculateRates(address _asset) private view returns (uint256, uint256)
+    {
         uint256 borrowRate = 0;
         uint256 depositRate = 0;
 
@@ -114,24 +124,14 @@ contract Pool is IPool, ReentrancyGuard {
         return (borrowRate, depositRate);
     }
 
-    function calculatePrice(address _asset) private view returns (uint256) {
-        //WETH Address: 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 MAINET
-        // WETH Address: 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9  SEPOLIA
+    function calculatePrice(address _asset) private view returns (uint256) 
+    {
+        if(_asset == USD)
+        {
+            return 10**18;
+        }
 
-        address poolAddress = address(
-            uint160(
-                uint256(
-                    keccak256(
-                        abi.encodePacked(
-                            hex'ff',
-                            UNISWAPFACTORY,
-                            keccak256(abi.encode(WETH, _asset, 500)),
-                            POOL_INIT_CODE_HASH
-                        )
-                    )
-                )
-            )
-        );
+        address poolAddress = getAddress(_asset);
 
         IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
         
@@ -145,8 +145,38 @@ contract Pool is IPool, ReentrancyGuard {
 
         uint256 priceAdj = priceFromSqrtX96 * 10**6; 
 
-        uint256 finalPrice = ((1 * 10**48) / priceAdj) * 10 ** 18;
+        uint256 finalPrice = ((1 * 10**48) / priceAdj);
 
-        return finalPrice;
+        return 10**36/finalPrice;
+    }
+
+    function getAddress(address _asset) private view returns (address) 
+    {
+        IUniswapV3Factory factory = IUniswapV3Factory(UNISWAPFACTORY);
+        return factory.getPool(USD, _asset, 500);
+    }
+
+    function getAssetsSum(address[] memory addresses, mapping(address => uint256) storage amountOfEach) private view returns (uint256)
+    {
+        uint256 sum = 0;
+        for (uint256 i = 0; i < addresses.length; i++) {
+            address addressKey = addresses[i];
+            uint256 value = amountOfEach[addressKey];
+
+            sum += (value * calculatePrice(addressKey))/(10**18);
+        }
+
+        return sum;
+    }
+
+    function getUserBalances(address user, address _asset) public view returns (uint256, uint256)
+    {
+        return (depositBalances[user][_asset], borrowedBalances[user][_asset]);
+    }
+    function getAssetBalances(address _asset) public view returns (uint256, uint256){
+        return (netDeposits[_asset], netBorrows[_asset]);
+    }
+    function getInterestRates(address _asset) public view returns (uint256, uint256){
+        return reCalculateRates(_asset);
     }
 }
