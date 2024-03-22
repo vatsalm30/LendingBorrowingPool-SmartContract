@@ -18,7 +18,14 @@ contract BorrowApplication is ERC721, ERC721URIStorage, AccessControl
 
     mapping(uint256 => bool) filledApps;
 
-    constructor() ERC721("BorrowApp", "BAP") {}
+    bytes32 public constant OWNER = keccak256("OWNER");
+    bytes32 public constant INTERACTOR_CONTRACT = keccak256("INTERACTOR_CONTRACT");
+
+    constructor() ERC721("BorrowApp", "BAP") 
+    {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(OWNER, msg.sender);
+    }
 
     function safeMint(string memory applicationURI, address asset, uint256 amountOfAsset) public
     {
@@ -35,6 +42,11 @@ contract BorrowApplication is ERC721, ERC721URIStorage, AccessControl
         applicationIDs++;
     }
 
+    function bindInteractorContract(address contractAddress) public onlyRole(OWNER) 
+    {
+        _grantRole(INTERACTOR_CONTRACT, contractAddress);
+    }
+
     function getViability(uint256 appID) public view returns(uint8)
     {
         require(appID < applicationIDs, "Application ID does not exist");
@@ -44,17 +56,17 @@ contract BorrowApplication is ERC721, ERC721URIStorage, AccessControl
 
     // MAKE THIS IMPLIEMTNATION MORE ADVANCED
     // restrict function to only be called by the managerial contract
-    function updateViability(uint256 appID, uint8 averageRanking) public 
+    function updateViability(uint256 appID, uint8 averageRanking) public onlyRole(INTERACTOR_CONTRACT)
     {
         require(appID < applicationIDs, "Application ID does not exist");
-        require(tx.origin != msg.sender, "This function can only be called by a contract");
+        // require(tx.origin != msg.sender, "This function can only be called by a contract");
 
         viability[appID] = averageRanking;
     }
 
     function getLastApplication() public view returns(uint256)
     {
-        return applicationIDs;
+        return applicationIDs - 1;
     }
 
     function getFilled(uint256 appID) public view returns(bool)
@@ -73,10 +85,10 @@ contract BorrowApplication is ERC721, ERC721URIStorage, AccessControl
 
 
     // restrict function to only be called by the managerial contract
-    function lendedAssets(uint256 appID, uint256 lendAmt) public returns(bool)
+    function lendedAssets(uint256 appID, uint256 lendAmt) public onlyRole(INTERACTOR_CONTRACT) returns(bool)
     {
         require(appID < applicationIDs, "Application ID does not exist");
-        require(tx.origin != msg.sender, "This function can only be called by a contract");
+        // require(tx.origin != msg.sender, "This function can only be called by a contract");
 
         amountOfAssetsFilled[appID] += lendAmt;
         if(amountOfAssetsFilled[appID] >= amountOfAssets[appID])
